@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="bg">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>CRM – Дигитални менюта</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+<h1>CRM · Дигитални менюта</h1>
+<input id="q" type="search" placeholder="Търси заведение, град, контакт…">
+<button class="pri" id="add">+ Нова сделка</button>
+<button id="imp">Импорт CSV</button><input id="file" type="file" accept=".csv" hidden>
+<span id="who" class="note"></span><button id="logout">Изход</button>
+</header>
+<div class="kpis" id="kpis"></div>
+<div id="gate"><form id="lf"><h2>Вход в CRM</h2>
+<label>Имейл<input id="em" type="email" autocomplete="username" required></label>
+<label>Парола<input id="pw" type="password" autocomplete="current-password" required></label>
+<button class="pri" type="submit">Вход</button>
+<div id="lerr" class="note" role="alert"></div>
+<button type="button" id="reset">Забравена парола</button>
+<button type="button" id="login">Вход с Google</button></form></div>
+<div class="board" id="board"></div>
+<div class="note" id="mode"></div>
+<div class="ov" id="ov"><div class="sheet" id="sheet"></div></div>
+<script type="module">
+import {initializeApp} from "https://www.gstatic.com/firebasejs/10.14.1/firebase-app.js";
+import {getAuth,GoogleAuthProvider,signInWithPopup,signInWithEmailAndPassword,sendPasswordResetEmail,onAuthStateChanged,signOut} from "https://www.gstatic.com/firebasejs/10.14.1/firebase-auth.js";
+import {getFirestore,collection,doc,setDoc,deleteDoc,onSnapshot,writeBatch} from "https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore.js";
+const app=initializeApp({apiKey:"AIzaSyBPqlMt6_yKfgx8cqEdl5iFWVAjzISvq-I",authDomain:"crm-software-e3bb5.firebaseapp.com",projectId:"crm-software-e3bb5",storageBucket:"crm-software-e3bb5.firebasestorage.app",messagingSenderId:"17652808288",appId:"1:17652808288:web:d26382e3aceaa54614e105"});
+const auth=getAuth(app),fs=getFirestore(app);
+
+const STAGES=["Нов лийд","Първи контакт","Демо","Оферта изпратена","Преговори","Спечелено","Загубено"];
+const TYPES=["Ресторант","Бар","Кафене","Хотел","Верига","Друго"];
+const SRC=["Студено посещение","Препоръка","Instagram","Facebook","Уебсайт","Изложение"];
+const LOST=["Цена","„Ще помисля“","Ползват конкурент","Нямат нужда","Смяна на ръководство","Друго"];
+let deals=[],col=null,editing=null;
+const $=s=>document.querySelector(s);
+const esc=s=>String(s??"").replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const num=v=>parseFloat(v)||0;
+const fmt=n=>n.toLocaleString("bg-BG")+" лв.";
+function ymd(d){return d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0")+"-"+String(d.getDate()).padStart(2,"0")}
+const today=ymd(new Date());
+const in30=ymd(new Date(Date.now()+30*864e5));
+
+function render(){
+  const q=$("#q").value.toLowerCase();
+  const vis=deals.filter(d=>!q||[d.name,d.city,d.contact,d.phone].join(" ").toLowerCase().includes(q));
+  const open=deals.filter(d=>d.stage<5);
+  const won=deals.filter(d=>d.stage===5);
+  const todo=open.filter(d=>d.next&&d.next<=today).length;
+  const ren=won.filter(d=>d.renewal&&d.renewal<=in30).length;
+  $("#kpis").innerHTML=
+   `<div class="kpi"><b>${open.length}</b><span>Активни сделки</span></div>`+
+   `<div class="kpi"><b>${fmt(open.reduce((s,d)=>s+num(d.oneTime),0))}</b><span>Потенциал (еднократно)</span></div>`+
+   `<div class="kpi"><b>${fmt(won.reduce((s,d)=>s+num(d.monthly),0))}</b><span>Месечни приходи (MRR)</span></div>`+
+   `<div class="kpi"><b class="${todo||ren?"due":""}">${todo} / ${ren}</b><span>Действия за днес / подновявания до 30 дни</span></div>`;
+  $("#board").innerHTML=STAGES.map((n,i)=>{
+    const c=vis.filter(d=>d.stage===i);
+    return `<div class="col"><h2><span>${n}</span><span>${c.length}</span></h2>`+c.map(d=>{
+      const nx=d.next?`<small class="${d.next<=today?"due":""}">▸ ${esc(d.next)} ${esc(d.nextNote||"")}</small>`:"";
+      const rn=i===5&&d.renewal?`<small class="${d.renewal<=in30?"soon":""}">↻ ${esc(d.renewal)}</small>`:"";
+      return `<div class="card" data-id="${esc(d.id)}"><b>${esc(d.name)}</b><small>${esc(d.city||"")} ${d.tables?"· "+esc(d.tables)+" маси":""}</small>`+
+       (d.oneTime||d.monthly?`<small>${fmt(num(d.oneTime))} + ${fmt(num(d.monthly))}/мес.</small>`:"")+nx+rn+`</div>`}).join("")+`</div>`}).join("");
+}
+
+function opts(a,v){return a.map((x,i)=>`<option value="${esc(x)}"${x===v?" selected":""}>${esc(x)}</option>`).join("")}
+function openForm(id){
+  editing=id;const d=deals.find(x=>x.id===id)||{stage:0};
+  const f=(k,l,t="text")=>`<label>${l}</label><input data-k="${k}" type="${t}" value="${esc(d[k])}">`;
+  $("#sheet").innerHTML=`<b style="font-size:17px">${id?"Редакция":"Нова сделка"}</b>`+
+   f("name","Заведение *")+
+   `<div class="row2"><div>${f("city","Град")}</div><div><label>Тип</label><select data-k="type">${opts(TYPES,d.type)}</select></div></div>`+
+   `<div class="row2"><div>${f("tables","Брой маси","number")}</div><div><label>Източник</label><select data-k="source">${opts(SRC,d.source)}</select></div></div>`+
+   f("contact","Лице за контакт")+
+   `<div class="row2"><div>${f("phone","Телефон","tel")}</div><div>${f("email","Имейл","email")}</div></div>`+
+   `<div class="row2"><div>${f("oneTime","Еднократно (лв.)","number")}</div><div>${f("monthly","Месечна такса (лв.)","number")}</div></div>`+
+   `<label>Етап</label><select data-k="stage">${STAGES.map((s,i)=>`<option value="${i}"${i===d.stage?" selected":""}>${s}</option>`).join("")}</select>`+
+   `<label>Причина за загуба (ако е загубено)</label><select data-k="lostReason"><option value=""></option>${opts(LOST,d.lostReason)}</select>`+
+   `<div class="row2"><div>${f("next","Следващо действие (дата)","date")}</div><div>${f("nextNote","Какво")}</div></div>`+
+   f("renewal","Подновяване на договор","date")+
+   `<label>Бележки</label><textarea data-k="notes" rows="3">${esc(d.notes)}</textarea>`+
+   `<div class="acts"><button class="pri" id="save">Запази</button><button id="cancel">Затвори</button>${id?'<button class="del" id="del">Изтрий</button>':""}</div>`;
+  $("#ov").classList.add("on");
+  $("#cancel").onclick=close;$("#save").onclick=save;
+  if(id)$("#del").onclick=()=>{if(confirm("Да изтрия ли сделката?")){remove(id);close()}};
+}
+function close(){$("#ov").classList.remove("on")}
+function save(){
+  const o={};document.querySelectorAll("#sheet [data-k]").forEach(e=>o[e.dataset.k]=e.value);
+  if(!o.name.trim()){alert("Въведете име на заведението.");return}
+  o.stage=parseInt(o.stage);
+  const old=deals.find(x=>x.id===editing)||{};
+  o.created=old.created||today;
+  if(o.stage===5&&!o.renewal){const d=new Date();d.setFullYear(d.getFullYear()+1);o.renewal=ymd(d)}
+  persist(editing||("d"+Date.now()),o);close();
+}
+
+async function persist(id,o){try{await setDoc(doc(fs,"deals",id),o)}catch(e){alert("Нямате право за запис или няма връзка.")}}
+async function remove(id){try{await deleteDoc(doc(fs,"deals",id))}catch(e){alert("Неуспешно изтриване.")}}
+function parseCSV(t){const r=[];let row=[],f="",q=false;t=t.replace(/^\uFEFF/,"");
+ for(let i=0;i<t.length;i++){const c=t[i];
+  if(q){if(c=='"'){if(t[i+1]=='"'){f+='"';i++}else q=false}else f+=c}
+  else if(c=='"')q=true;else if(c==","){row.push(f);f=""}
+  else if(c=="\n"){row.push(f);r.push(row);row=[];f=""}else if(c!="\r")f+=c}
+ if(f||row.length){row.push(f);r.push(row)}return r}
+$("#imp").onclick=()=>$("#file").click();
+$("#file").onchange=async e=>{
+  const fl=e.target.files[0];if(!fl)return;
+  const rows=parseCSV(await fl.text()).filter(r=>r.length>1),h=rows.shift().map(x=>x.trim());
+  const g=(r,k)=>(r[h.indexOf(k)]||"").trim();
+  const list=rows.filter(r=>g(r,"Name"));
+  if(!list.length||h.indexOf("Name")<0){alert("Не намирам колона „Name“ във файла.");return}
+  if(!confirm("Да импортирам ли "+list.length+" заведения като нови лийдове?"))return;
+  const b=writeBatch(fs);
+  list.forEach((r,i)=>{
+    const n=g(r,"#")||String(i+1);
+    const notes=[g(r,"Cuisine")&&"Кухня: "+g(r,"Cuisine"),g(r,"Area")&&"Район: "+g(r,"Area"),g(r,"Address")&&"Адрес: "+g(r,"Address"),g(r,"Rating")&&"Рейтинг: "+g(r,"Rating")+" ("+g(r,"Reviews")+" отзива)",g(r,"Price")&&"Цена: "+g(r,"Price"),g(r,"Closed on")&&"Затворено: "+g(r,"Closed on")].filter(Boolean).join(" · ");
+    b.set(doc(fs,"deals","s"+n.padStart(3,"0")),{name:g(r,"Name"),city:"София",type:"Ресторант",phone:g(r,"Phone"),stage:0,notes,created:today});
+  });
+  try{await b.commit()}catch(err){alert("Импортът не успя: "+err.message)}
+  e.target.value="";
+};
+$("#add").onclick=()=>openForm(null);
+$("#q").oninput=render;
+$("#board").onclick=e=>{const c=e.target.closest(".card");if(c)openForm(c.dataset.id)};
+$("#ov").onclick=e=>{if(e.target.id==="ov")close()};
+$("#login").onclick=()=>signInWithPopup(auth,new GoogleAuthProvider()).catch(e=>alert("Входът не успя: "+e.message));
+$("#logout").onclick=()=>signOut(auth);
+$("#lf").onsubmit=async e=>{e.preventDefault();$("#lerr").textContent="";
+  try{await signInWithEmailAndPassword(auth,$("#em").value.trim(),$("#pw").value);$("#pw").value=""}
+  catch(err){$("#lerr").textContent=err.code==="auth/too-many-requests"?"Твърде много опити. Опитайте по-късно.":"Грешен имейл или парола."}};
+$("#reset").onclick=async()=>{const m=$("#em").value.trim();
+  if(!m){$("#lerr").textContent="Въведете имейл, за да изпратим линк за нова парола.";return}
+  try{await sendPasswordResetEmail(auth,m)}catch(e){}
+  $("#lerr").textContent="Ако акаунтът съществува, изпратихме линк за нова парола."};
+let unsub=null;
+document.body.classList.add("out");
+onAuthStateChanged(auth,u=>{
+  document.body.classList.toggle("out",!u);
+  if(unsub){unsub();unsub=null}
+  if(!u){deals=[];render();return}
+  $("#who").textContent=u.email;$("#mode").textContent="";
+  unsub=onSnapshot(collection(fs,"deals"),s=>{deals=s.docs.map(d=>({...d.data(),id:d.id}));render()},
+    ()=>{$("#mode").textContent="Нямате достъп с "+u.email+". Добавете имейла в правилата на Firestore."});
+});
+render();
+</script>
+</body>
+</html>
